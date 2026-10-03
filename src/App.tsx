@@ -1,722 +1,183 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { AlertTriangle, ArrowRight, CalendarDays, Check, ChevronRight, Clock3, LayoutDashboard, MapPin, Pencil, Plus, Radio, RefreshCw, Trash2, Users } from 'lucide-react'
 
 const API = 'http://localhost:3001'
 
-// ── Types ────────────────────────────────────────────────────────────────────
-type Venue = { id: string; name: string; capacity: number; availability: string; status: string }
-type Session = { id: string; name: string; owner: string; status: string; risk: string; startTime: string; endTime: string; venueId: string; venue?: Venue; requiredResources: string }
-type Task = { id: string; title: string; owner: string; role: string; status: string; priority: string; sessionId: string | null; blocker: string | null; escalationRequired: boolean }
+type Venue = { id: string; name: string; capacity: number; availability: string; status: string; eventId?: string | null }
+type Session = { id: string; name: string; eventId: string; owner: string; status: string; risk: string; startTime: string; endTime: string; venueId: string | null; venue?: Venue | null; requiredResources: string }
+type Task = { id: string; title: string; eventId?: string | null; owner: string; role: string; status: string; priority: string; sessionId: string | null; venueId?: string | null; blocker: string | null; escalationRequired: boolean }
 type EventRecord = { id: string; name: string; status: string; startDate: string; endDate: string; location: string; overallProgress: number; riskLevel: string }
-type Stats = { totalTasks: number; completedTasks: number; blockedTasks: number; inProgressTasks: number; criticalRisks: number; atRiskSessions: number; totalSessions: number; unavailableVenues: number; escalationRequired: number; eventName: string; eventStatus: string; overallProgress: number }
+type Stats = { totalTasks: number; completedTasks: number; blockedTasks: number; inProgressTasks: number; criticalRisks: number; totalSessions: number; unavailableVenues: number; escalationRequired: number; eventName: string; eventStatus: string; overallProgress: number }
 type ImpactReport = { venueName: string; severity: string; affectedSessionCount: number; affectedTaskCount: number; affectedResourceCount: number; affectedVolunteerCount: number; explanation: string; recommendedActions: string[]; affectedSessions: { id: string; name: string; owner: string; currentRisk: string }[] }
 type NotionStatus = { connected: boolean; lastSync: string; dbCount: number }
+type Tab = 'Dashboard' | 'Events' | 'Sessions' | 'Tasks' | 'Venues' | 'Impact Analysis' | 'Notion Sync'
+type Editor = { entity: 'event' | 'session' | 'task' | 'venue'; id?: string; data: Record<string, string | number | null> }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-function cn(...classes: (string | false | undefined | null)[]) {
-  return classes.filter(Boolean).join(' ')
+const TABS: { label: Tab; icon: typeof LayoutDashboard }[] = [
+  { label: 'Dashboard', icon: LayoutDashboard }, { label: 'Events', icon: CalendarDays }, { label: 'Sessions', icon: Clock3 },
+  { label: 'Tasks', icon: Check }, { label: 'Venues', icon: MapPin }, { label: 'Impact Analysis', icon: AlertTriangle }, { label: 'Notion Sync', icon: RefreshCw }
+]
+const STATUS = ['To Do', 'In Progress', 'Blocked', 'Done']
+const ROLES = ['Operations', 'Volunteers', 'Technical', 'Marketing', 'Leadership']
+const initialDate = () => new Date().toISOString().slice(0, 16)
+const inputDate = (date: string) => date ? new Date(date).toISOString().slice(0, 16) : ''
+
+function cn(...classes: (string | boolean | undefined | null)[]) { return classes.filter(Boolean).join(' ') }
+function badge(status: string) {
+  if (['Blocked', 'Needs Rescheduling', 'High', 'Critical', 'Unavailable', 'At Risk'].includes(status)) return 'border-rose-200 bg-rose-50 text-rose-700'
+  if (['In Progress', 'Medium', 'Reserved'].includes(status)) return 'border-amber-200 bg-amber-50 text-amber-700'
+  if (['Done', 'Completed', 'Live', 'Low', 'Available', 'Active', 'Scheduled', 'Planning'].includes(status)) return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+  return 'border-slate-200 bg-slate-50 text-slate-600'
 }
+function Badge({ children, value }: { children?: React.ReactNode; value?: string }) { return <span className={cn('inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-bold tracking-wide', badge(value ?? String(children)))}>{children ?? value}</span> }
+function Panel({ children, className = '' }: { children: React.ReactNode; className?: string }) { return <section className={cn('rounded-2xl border border-slate-200 bg-white shadow-md shadow-slate-200/40', className)}>{children}</section> }
+function IconButton({ label, onClick, danger = false }: { label: string; onClick: () => void; danger?: boolean }) { return <button title={label} aria-label={label} onClick={onClick} className={cn('rounded-lg p-2 transition-colors', danger ? 'text-rose-500 hover:bg-rose-50' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700')}>{danger ? <Trash2 size={16} /> : <Pencil size={16} />}</button> }
 
-function riskBg(risk: string) {
-  if (risk === 'High' || risk === 'Critical') return 'bg-rose-500/15 border-rose-500/30 text-rose-400'
-  if (risk === 'Medium') return 'bg-amber-500/15 border-amber-500/30 text-amber-400'
-  return 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-}
-
-function statusBg(status: string) {
-  if (status === 'Blocked' || status === 'Needs Rescheduling') return 'bg-rose-500/15 border-rose-500/30 text-rose-400'
-  if (status === 'At Risk' || status === 'In Progress') return 'bg-amber-500/15 border-amber-500/30 text-amber-400'
-  if (status === 'Done' || status === 'Completed' || status === 'Live') return 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
-  return 'bg-slate-700/40 border-slate-600/30 text-slate-300'
-}
-
-function priorityDot(p: string) {
-  if (p === 'Critical') return 'bg-rose-500'
-  if (p === 'High') return 'bg-amber-500'
-  if (p === 'Medium') return 'bg-blue-400'
-  return 'bg-slate-500'
-}
-
-function formatTime(iso: string) {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
-
-// ── Components ───────────────────────────────────────────────────────────────
-function Badge({ label, className }: { label: string; className: string }) {
-  return (
-    <span className={cn('inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border', className)}>
-      {label}
-    </span>
-  )
-}
-
-function Card({ title, children, className }: { title?: string; children: React.ReactNode; className?: string }) {
-  return (
-    <div className={cn('bg-slate-900/60 border border-slate-800/80 rounded-2xl overflow-hidden backdrop-blur-sm', className)}>
-      {title && (
-        <div className="px-6 py-4 border-b border-slate-800/80 flex items-center gap-2">
-          <span className="font-semibold text-slate-200 text-sm tracking-wide">{title}</span>
-        </div>
-      )}
-      <div className="p-6">{children}</div>
-    </div>
-  )
-}
-
-function StatCard({ label, value, sub, accent }: { label: string; value: string | number; sub?: string; accent: string }) {
-  return (
-    <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-5 backdrop-blur-sm">
-      <p className="text-xs font-medium text-slate-400 uppercase tracking-widest mb-2">{label}</p>
-      <p className={cn('text-3xl font-bold tabular-nums', accent)}>{value}</p>
-      {sub && <p className="text-xs text-slate-500 mt-1">{sub}</p>}
-    </div>
-  )
-}
-
-// ── Tabs ─────────────────────────────────────────────────────────────────────
-type Tab = 'Dashboard' | 'Events' | 'Sessions' | 'Tasks' | 'Impact Analysis' | 'Notion Sync'
-const TABS: Tab[] = ['Dashboard', 'Events', 'Sessions', 'Tasks', 'Impact Analysis', 'Notion Sync']
-const ROLES = ['Leadership', 'Operations', 'Volunteers', 'Technical'] as const
-type Role = typeof ROLES[number]
-
-// ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState<Tab>('Dashboard')
-  const [role, setRole] = useState<Role>('Leadership')
   const [stats, setStats] = useState<Stats | null>(null)
   const [venues, setVenues] = useState<Venue[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [events, setEvents] = useState<EventRecord[]>([])
+  const [activeEventId, setActiveEventId] = useState('')
+  const [editor, setEditor] = useState<Editor | null>(null)
+  const [toast, setToast] = useState<{ message: string; error?: boolean } | null>(null)
   const [notionStatus, setNotionStatus] = useState<NotionStatus | null>(null)
-  const [newTaskTitle, setNewTaskTitle] = useState('')
-  const [newTaskOwner, setNewTaskOwner] = useState('')
-  const [eventForm, setEventForm] = useState({ name: '', location: '', startDate: '', endDate: '' })
-
-  // Impact analysis
   const [selectedVenueId, setSelectedVenueId] = useState('')
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [isApplying, setIsApplying] = useState(false)
   const [impact, setImpact] = useState<ImpactReport | null>(null)
-  const [changeApplied, setChangeApplied] = useState(false)
-  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
 
-  const showToast = (msg: string, type: 'success' | 'error') => {
-    setToast({ msg, type })
-    setTimeout(() => setToast(null), 4000)
+  const showToast = (message: string, error = false) => { setToast({ message, error }); window.setTimeout(() => setToast(null), 3500) }
+  const request = async (path: string, method = 'GET', body?: unknown) => {
+    const response = await fetch(`${API}${path}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error ?? 'Unable to save this change')
+    return data
   }
-
   const loadAll = useCallback(async () => {
     try {
-      const [s, v, sess, t, e] = await Promise.all([
-        fetch(`${API}/api/stats`).then(r => r.json()),
-        fetch(`${API}/api/venues`).then(r => r.json()),
-        fetch(`${API}/api/sessions`).then(r => r.json()),
-        fetch(`${API}/api/tasks`).then(r => r.json()),
-        fetch(`${API}/api/events`).then(r => r.json())
+      const query = activeEventId ? `?eventId=${encodeURIComponent(activeEventId)}` : ''
+      const [nextStats, nextVenues, nextSessions, nextTasks, nextEvents] = await Promise.all([
+        request(`/api/stats${query}`), request(`/api/venues${query}`), request(`/api/sessions${query}`), request(`/api/tasks${query}`), request('/api/events')
       ])
-      setStats(s)
-      setVenues(v)
-      setSessions(sess)
-      setTasks(t)
-      setEvents(e)
-    } catch {
-      showToast('Failed to connect to EventAstra server. Is it running on port 3001?', 'error')
-    }
-  }, [])
-
+      setStats(nextStats); setVenues(nextVenues); setSessions(nextSessions); setTasks(nextTasks); setEvents(nextEvents)
+      setActiveEventId(current => current || nextEvents[0]?.id || '')
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Unable to connect to the server', true) }
+  }, [activeEventId])
   useEffect(() => { loadAll() }, [loadAll])
+  useEffect(() => { if (tab === 'Notion Sync') request('/api/notion/status').then(setNotionStatus).catch(() => showToast('Notion status is unavailable', true)) }, [tab])
 
-  const loadNotion = async () => {
-    const status = await fetch(`${API}/api/notion/status`).then(r => r.json())
-    setNotionStatus(status)
+  const openNew = (entity: Editor['entity']) => {
+    const defaults: Record<Editor['entity'], Editor['data']> = {
+      event: { name: '', location: '', startDate: initialDate(), endDate: initialDate(), status: 'Planning', riskLevel: 'Low', overallProgress: 0 },
+      venue: { name: '', capacity: 100, availability: 'Available', status: 'Active' },
+      session: { name: '', owner: '', venueId: '', startTime: initialDate(), endTime: initialDate(), requiredResources: '', status: 'Scheduled', risk: 'Low' },
+      task: { title: '', owner: '', role: 'Operations', priority: 'Medium', status: 'To Do', sessionId: '', venueId: '', blocker: '' }
+    }
+    setEditor({ entity, data: defaults[entity] })
   }
-
-  useEffect(() => {
-    if (tab === 'Notion Sync') loadNotion()
-  }, [tab])
-
-  const handleAnalyze = async () => {
+  const openEdit = (entity: Editor['entity'], item: EventRecord | Venue | Session | Task) => {
+    if (entity === 'event') { const event = item as EventRecord; setEditor({ entity, id: event.id, data: { ...event, startDate: inputDate(event.startDate), endDate: inputDate(event.endDate), overallProgress: Math.round(event.overallProgress * 100) } }) }
+    if (entity === 'venue') { const venue = item as Venue; setEditor({ entity, id: venue.id, data: { name: venue.name, capacity: venue.capacity, availability: venue.availability, status: venue.status } }) }
+    if (entity === 'session') { const session = item as Session; setEditor({ entity, id: session.id, data: { name: session.name, owner: session.owner, venueId: session.venueId ?? '', startTime: inputDate(session.startTime), endTime: inputDate(session.endTime), requiredResources: session.requiredResources, status: session.status, risk: session.risk } }) }
+    if (entity === 'task') { const task = item as Task; setEditor({ entity, id: task.id, data: { title: task.title, owner: task.owner, role: task.role, priority: task.priority, status: task.status, sessionId: task.sessionId ?? '', venueId: task.venueId ?? '', blocker: task.blocker ?? '' } }) }
+  }
+  const updateEditor = (key: string, value: string | number | null) => setEditor(current => current ? { ...current, data: { ...current.data, [key]: value } } : current)
+  const saveEditor = async () => {
+    if (!editor) return
+    const { entity, id, data } = editor
+    try {
+      const normalised = { ...data, ...(entity === 'event' ? { overallProgress: Number(data.overallProgress) / 100 } : {}), ...(entity === 'session' ? { venueId: data.venueId || null, eventId: activeEventId } : {}), ...(entity === 'task' ? { sessionId: data.sessionId || null, venueId: data.venueId || null, eventId: activeEventId } : {}), ...(entity === 'venue' ? { capacity: Number(data.capacity), eventId: activeEventId } : {}) }
+      await request(`/api/${entity === 'event' ? 'events' : `${entity}s`}${id ? `/${id}` : ''}`, id ? 'PATCH' : 'POST', normalised)
+      setEditor(null); await loadAll(); showToast(`${entity[0].toUpperCase() + entity.slice(1)} ${id ? 'updated' : 'created'} successfully`)
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Unable to save', true) }
+  }
+  const remove = async (entity: Editor['entity'], id: string) => {
+    if (!window.confirm(`Delete this ${entity}? Linked records will be unassigned or removed.`)) return
+    try { await request(`/api/${entity === 'event' ? 'events' : `${entity}s`}/${id}`, 'DELETE'); await loadAll(); showToast(`${entity[0].toUpperCase() + entity.slice(1)} deleted`) } catch (error) { showToast(error instanceof Error ? error.message : 'Unable to delete', true) }
+  }
+  const setTaskStatus = async (task: Task, status: string) => {
+    try { await request(`/api/tasks/${task.id}`, 'PATCH', { status }); await loadAll() } catch (error) { showToast(error instanceof Error ? error.message : 'Unable to update task', true) }
+  }
+  const runAnalysis = async () => {
     if (!selectedVenueId) return
-    setIsAnalyzing(true)
-    setImpact(null)
-    setChangeApplied(false)
-    const res = await fetch(`${API}/api/impact-analysis`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'Venue', id: selectedVenueId })
-    })
-    setImpact(await res.json())
-    setIsAnalyzing(false)
+    setAnalyzing(true); setImpact(null)
+    try { setImpact(await request('/api/impact-analysis', 'POST', { type: 'Venue', id: selectedVenueId, eventId: activeEventId })) } catch { showToast('Unable to run analysis', true) } finally { setAnalyzing(false) }
   }
+  const activeEvent = events.find(event => event.id === activeEventId)
+  const openCount = tasks.filter(task => task.status !== 'Done').length
+  const progress = stats ? Math.round(stats.overallProgress * 100) : 0
 
-  const handleApplyChange = async () => {
-    if (!selectedVenueId || !impact) return
-    setIsApplying(true)
-    const res = await fetch(`${API}/api/apply-change`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'Venue', id: selectedVenueId, action: 'Make Unavailable' })
-    })
-    const result = await res.json()
-    setIsApplying(false)
-    if (result.success) {
-      setChangeApplied(true)
-      showToast('Change applied! Notion sync in progress...', 'success')
-      await loadAll()
-    } else {
-      showToast('Failed to apply change.', 'error')
-    }
-  }
-
-  const handleReset = async () => {
-    await fetch(`${API}/api/reset`, { method: 'POST' })
-    setImpact(null)
-    setChangeApplied(false)
-    setSelectedVenueId('')
-    await loadAll()
-    showToast('Demo data reset to initial state.', 'success')
-  }
-
-  const updateTask = async (task: Task, update: Partial<Pick<Task, 'status' | 'escalationRequired' | 'blocker'>>) => {
-    try {
-      const response = await fetch(`${API}/api/tasks/${task.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(update)
-      })
-      if (!response.ok) throw new Error('Task update failed')
-      await loadAll()
-      showToast(update.status === 'Done' ? 'Task marked complete.' : 'Task escalated to leadership.', 'success')
-    } catch {
-      showToast('Could not update the task. Please retry.', 'error')
-    }
-  }
-
-  const createTask = async () => {
-    if (!newTaskTitle.trim()) {
-      showToast('Enter a task title first.', 'error')
-      return
-    }
-    try {
-      const response = await fetch(`${API}/api/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: newTaskTitle,
-          owner: newTaskOwner.trim() || 'Command Center',
-          role: role === 'Leadership' ? 'Operations' : role,
-          priority: 'Medium'
-        })
-      })
-      if (!response.ok) throw new Error('Task creation failed')
-      setNewTaskTitle('')
-      setNewTaskOwner('')
-      await loadAll()
-      showToast('New task created.', 'success')
-    } catch {
-      showToast('Could not create the task. Please retry.', 'error')
-    }
-  }
-
-  const createEvent = async () => {
-    if (!Object.values(eventForm).every(value => value.trim())) {
-      showToast('Complete every event field first.', 'error')
-      return
-    }
-    try {
-      const response = await fetch(`${API}/api/events`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...eventForm, status: 'Planning', riskLevel: 'Low' })
-      })
-      if (!response.ok) throw new Error('Event creation failed')
-      setEventForm({ name: '', location: '', startDate: '', endDate: '' })
-      await loadAll()
-      showToast('Event created and queued for Notion sync.', 'success')
-    } catch {
-      showToast('Could not create the event. Please retry.', 'error')
-    }
-  }
-
-  const filteredTasks = role === 'Leadership'
-    ? tasks
-    : tasks.filter(t => t.role === role || t.role === 'Operations')
-
-  // ── Render ────────────────────────────────────────────────────────────────
-  return (
-    <div className="min-h-screen bg-[#080b16] text-slate-100 font-['Inter',sans-serif] selection:bg-cyan-400/30">
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');`}</style>
-
-      {/* Toast */}
-      {toast && (
-        <div className={cn(
-          'fixed top-4 right-4 z-50 px-5 py-3 rounded-xl border shadow-2xl text-sm font-medium transition-all',
-          toast.type === 'success' ? 'bg-emerald-900/90 border-emerald-500/40 text-emerald-200' : 'bg-rose-900/90 border-rose-500/40 text-rose-200'
-        )}>
-          {toast.msg}
-        </div>
-      )}
-
-      {/* Navbar */}
-      <nav className="border-b border-slate-800/60 bg-[#0d1017]/90 backdrop-blur-md sticky top-0 z-40 shadow-xl shadow-black/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-cyan-400 via-blue-500 to-violet-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-              <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div>
-              <span className="font-extrabold text-base tracking-tight bg-gradient-to-r from-cyan-300 via-blue-300 to-violet-300 bg-clip-text text-transparent">EventAstra</span>
-              <span className="ml-2 text-xs text-slate-500">Event intelligence, live</span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleReset}
-              className="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 transition-colors"
-            >
-              Reset Demo
-            </button>
-            <div className="flex items-center gap-2 bg-slate-800/70 border border-slate-700/50 rounded-lg px-3 py-1.5">
-              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <select
-                value={role}
-                onChange={e => setRole(e.target.value as Role)}
-                className="bg-transparent text-sm text-slate-200 focus:outline-none cursor-pointer"
-              >
-                {ROLES.map(r => <option key={r} value={r} className="bg-slate-900">{r}</option>)}
-              </select>
-            </div>
-          </div>
-        </div>
-      </nav>
-
-      {/* Tab Bar */}
-      <div className="border-b border-slate-800/60 bg-[#0d1017]/50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-8 flex gap-1 overflow-x-auto py-1">
-          {TABS.map(t => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={cn(
-                'px-4 py-2.5 text-sm font-medium rounded-lg transition-all whitespace-nowrap',
-                tab === t
-                  ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-400/25 shadow-sm shadow-cyan-900/30'
-                  : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'
-              )}
-            >
-              {t}
-            </button>
-          ))}
+  return <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#e0e7ff_0,_#f8faff_38%,_#eef2ff_100%)] text-slate-900">
+    <header className="sticky top-0 z-30 border-b border-indigo-100 bg-white/95 shadow-sm shadow-indigo-100/50 backdrop-blur">
+      <div className="mx-auto flex h-[72px] max-w-7xl items-center justify-between gap-4 px-4 sm:px-7">
+        <button onClick={() => setTab('Dashboard')} className="flex items-center gap-3 text-left">
+          <span className="grid size-10 place-items-center rounded-xl bg-slate-950 text-white shadow-lg shadow-slate-300"><Radio size={19} /></span>
+          <span><strong className="font-display block text-lg leading-5 tracking-tight">EventAstra</strong><span className="text-xs text-slate-500">Operations workspace</span></span>
+        </button>
+        <div className="flex items-center gap-2">
+          <select aria-label="Active event" value={activeEventId} onChange={event => { setActiveEventId(event.target.value); setImpact(null); setSelectedVenueId('') }} className="max-w-48 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-indigo-400">
+            {events.map(event => <option key={event.id} value={event.id}>{event.name}</option>)}
+          </select>
+          <button onClick={() => openNew('event')} className="button-primary hidden sm:inline-flex"><Plus size={16} /> New event</button>
         </div>
       </div>
+      <nav className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-4 sm:px-7" aria-label="Primary navigation">
+        {TABS.map(({ label, icon: Icon }) => <button key={label} onClick={() => setTab(label)} className={cn('flex items-center gap-2 whitespace-nowrap border-b-2 px-3 py-3 text-sm font-bold transition-colors', tab === label ? 'border-indigo-700 text-indigo-800' : 'border-transparent text-slate-600 hover:text-indigo-800')}><Icon size={15} />{label}</button>)}
+      </nav>
+    </header>
+    {toast && <div className={cn('fixed right-5 top-24 z-50 rounded-xl border px-4 py-3 text-sm font-semibold shadow-xl', toast.error ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700')}>{toast.message}</div>}
+    <main className="mx-auto max-w-7xl px-4 py-7 sm:px-7">
+      {tab === 'Dashboard' && stats && <div className="space-y-6">
+        <div className="grid gap-5 lg:grid-cols-[1.55fr_.85fr]">
+          <section className="overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-950 via-indigo-800 to-violet-800 p-7 text-white shadow-xl shadow-indigo-300 sm:p-8">
+            <p className="mb-4 text-xs font-bold uppercase tracking-[.2em] text-indigo-200">Active event</p>
+            <div className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="font-display text-3xl tracking-tight sm:text-4xl">{stats.eventName}</h1><p className="mt-2 flex items-center gap-1.5 text-sm text-slate-300"><MapPin size={15} />{activeEvent?.location ?? 'Set a location'}</p></div><Badge value={stats.eventStatus} /></div>
+            <div className="mt-9 flex items-end justify-between"><div><p className="font-display text-5xl">{progress}%</p><p className="mt-1 text-sm text-slate-400">readiness across the event</p></div><p className="rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold">{stats.completedTasks}/{stats.totalTasks} tasks complete</p></div>
+            <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/20"><div className="h-full rounded-full bg-gradient-to-r from-cyan-300 via-sky-300 to-indigo-200" style={{ width: `${progress}%` }} /></div>
+          </section>
+          <Panel className="p-6"><p className="text-xs font-bold uppercase tracking-[.16em] text-slate-400">Create something</p><h2 className="font-display mt-2 text-2xl">Keep the plan moving</h2><p className="mt-2 text-sm leading-6 text-slate-500">Add the next item without leaving your event workspace.</p><div className="mt-5 grid grid-cols-2 gap-2"><QuickAction icon={<CalendarDays size={17} />} label="Event" onClick={() => openNew('event')} /><QuickAction icon={<Clock3 size={17} />} label="Session" onClick={() => openNew('session')} /><QuickAction icon={<Check size={17} />} label="Task" onClick={() => openNew('task')} /><QuickAction icon={<MapPin size={17} />} label="Venue" onClick={() => openNew('venue')} /></div></Panel>
+        </div>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric label="Open tasks" value={openCount} note={`${stats.completedTasks} finished`} /><Metric label="Blocked" value={stats.blockedTasks} note="Need attention" tone="rose" /><Metric label="Sessions" value={stats.totalSessions} note={`${stats.criticalRisks} high risk`} tone="amber" /><Metric label="Escalations" value={stats.escalationRequired} note="Leadership queue" tone="violet" /></div>
+        <div className="grid gap-6 lg:grid-cols-[1.35fr_.85fr]">
+          <Panel><SectionHeader title="Upcoming sessions" action="View all" onClick={() => setTab('Sessions')} /><div className="divide-y divide-slate-100">{sessions.length ? sessions.slice().sort((a, b) => a.startTime.localeCompare(b.startTime)).slice(0, 5).map(session => <div key={session.id} className="flex items-center gap-4 px-5 py-4 sm:px-6"><div className="w-14 text-center"><p className="text-xs font-bold text-indigo-600">{new Date(session.startTime).toLocaleDateString([], { month: 'short', day: 'numeric' })}</p><p className="text-xs text-slate-400">{new Date(session.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p></div><div className="min-w-0 flex-1"><p className="truncate font-semibold">{session.name}</p><p className="mt-1 text-xs text-slate-500">{session.venue?.name ?? 'Venue unassigned'} · {session.owner}</p></div><Badge value={session.risk} /></div>) : <Empty label="No sessions yet" action="Add a session" onClick={() => openNew('session')} />}</div></Panel>
+          <Panel><SectionHeader title="Action center" action="View tasks" onClick={() => setTab('Tasks')} /><div className="space-y-3 p-5">{tasks.filter(task => task.status !== 'Done').slice(0, 4).map(task => <div key={task.id} className="rounded-xl border border-slate-100 p-3"><div className="flex gap-2"><span className={cn('mt-1.5 size-2 rounded-full', task.priority === 'Critical' ? 'bg-rose-500' : task.priority === 'High' ? 'bg-amber-500' : 'bg-indigo-500')} /><div className="min-w-0 flex-1"><p className="text-sm font-semibold">{task.title}</p><p className="mt-1 text-xs text-slate-500">{task.owner} · {task.role}</p></div><Badge value={task.status} /></div></div>)}{!tasks.some(task => task.status !== 'Done') && <Empty label="Everything is complete" action="Add task" onClick={() => openNew('task')} />}</div></Panel>
+        </div>
+      </div>}
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-8 py-8">
+      {tab === 'Events' && <EntityPage eyebrow="Portfolio" title="Events" description="Create, edit and switch between event plans." addLabel="New event" onAdd={() => openNew('event')}><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{events.map(event => <Panel key={event.id} className={cn('p-5 transition hover:-translate-y-0.5 hover:shadow-md', event.id === activeEventId && 'ring-2 ring-indigo-500')}><div className="flex justify-between gap-3"><button className="text-left" onClick={() => { setActiveEventId(event.id); setTab('Dashboard') }}><p className="font-display text-xl">{event.name}</p><p className="mt-1 flex items-center gap-1 text-sm text-slate-500"><MapPin size={14} />{event.location}</p></button><div className="flex"><IconButton label="Edit event" onClick={() => openEdit('event', event)} /><IconButton label="Delete event" danger onClick={() => remove('event', event.id)} /></div></div><div className="mt-5 flex items-center justify-between"><Badge value={event.status} /><span className="text-xs text-slate-500">{new Date(event.startDate).toLocaleDateString()} – {new Date(event.endDate).toLocaleDateString()}</span></div><div className="mt-5 h-1.5 rounded-full bg-slate-100"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${event.overallProgress * 100}%` }} /></div><p className="mt-2 text-xs font-semibold text-slate-500">{Math.round(event.overallProgress * 100)}% ready</p></Panel>)}</div></EntityPage>}
 
-        {/* ── DASHBOARD ─────────────────────────────────────────── */}
-        {tab === 'Dashboard' && stats && (
-          <div className="space-y-6">
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <div>
-                  <h1 className="text-2xl font-bold text-slate-100">{stats.eventName}</h1>
-                  <p className="text-sm text-slate-500 mt-0.5">Live operational view · {role} role</p>
-                </div>
-                <Badge label={stats.eventStatus} className={statusBg(stats.eventStatus)} />
-              </div>
-              {/* Progress bar */}
-              <div className="mt-4 h-2 bg-slate-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-amber-500 to-orange-600 rounded-full transition-all"
-                  style={{ width: `${Math.round(stats.overallProgress * 100)}%` }}
-                />
-              </div>
-              <p className="text-xs text-slate-500 mt-1">Overall progress: {Math.round(stats.overallProgress * 100)}%</p>
-            </div>
+      {tab === 'Sessions' && <EntityPage eyebrow="Program" title="Sessions" description="Build a schedule, assign owners and place each session in a venue." addLabel="New session" onAdd={() => openNew('session')}><div className="space-y-3">{sessions.map(session => <Panel key={session.id} className="p-5"><div className="flex flex-col justify-between gap-4 sm:flex-row"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="font-display text-xl">{session.name}</h2><Badge value={session.status} /><Badge value={session.risk} /></div><div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-500"><span className="flex items-center gap-1.5"><Clock3 size={15} />{new Date(session.startTime).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</span><span className="flex items-center gap-1.5"><MapPin size={15} />{session.venue?.name ?? 'Unassigned venue'}</span><span className="flex items-center gap-1.5"><Users size={15} />{session.owner}</span></div>{session.requiredResources && <p className="mt-3 text-xs text-slate-500"><strong className="text-slate-600">Resources:</strong> {session.requiredResources}</p>}</div><div className="flex shrink-0 self-end sm:self-start"><IconButton label="Edit session" onClick={() => openEdit('session', session)} /><IconButton label="Delete session" danger onClick={() => remove('session', session.id)} /></div></div></Panel>)}{!sessions.length && <Empty label="Your program is empty" action="Create the first session" onClick={() => openNew('session')} />}</div></EntityPage>}
 
-            {/* Stat cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <StatCard label="Total Tasks" value={stats.totalTasks} sub={`${stats.completedTasks} done`} accent="text-slate-100" />
-              <StatCard label="Blocked" value={stats.blockedTasks} sub="Need immediate action" accent="text-rose-400" />
-              <StatCard label="Critical Risks" value={stats.criticalRisks} sub="High-risk sessions" accent="text-amber-400" />
-              <StatCard label="Escalations" value={stats.escalationRequired} sub="Require leadership" accent="text-orange-400" />
-            </div>
+      {tab === 'Tasks' && <EntityPage eyebrow="Workboard" title="Tasks" description="Edit ownership, priority and links from one focused board." addLabel="New task" onAdd={() => openNew('task')}><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{STATUS.map(status => <Panel key={status} className="overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-5 py-3"><h2 className="font-display text-lg">{status}</h2><span className="grid size-6 place-items-center rounded-full bg-white text-xs font-bold text-slate-500">{tasks.filter(task => task.status === status).length}</span></div><div className="min-h-32 space-y-3 p-3">{tasks.filter(task => task.status === status).map(task => <article key={task.id} className={cn('rounded-xl border p-4 shadow-sm', task.escalationRequired ? 'border-rose-200 bg-rose-50/40' : 'border-slate-100 bg-white')}><div className="flex justify-between gap-2"><h3 className="text-sm font-bold leading-5">{task.title}</h3><div className="flex -mt-1 -mr-2"><IconButton label="Edit task" onClick={() => openEdit('task', task)} /><IconButton label="Delete task" danger onClick={() => remove('task', task.id)} /></div></div><p className="mt-2 text-xs text-slate-500">{task.owner} · {task.role}</p>{task.blocker && <p className="mt-2 text-xs text-rose-600">{task.blocker}</p>}<div className="mt-3 flex items-center justify-between gap-2"><Badge value={task.priority} /><select aria-label={`Change ${task.title} status`} value={task.status} onChange={event => setTaskStatus(task, event.target.value)} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-600 outline-none">{STATUS.map(option => <option key={option}>{option}</option>)}</select></div></article>)}</div></Panel>)}</div></EntityPage>}
 
-            {/* Sessions + Tasks overview */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <Card title="Sessions">
-                <div className="space-y-3">
-                  {sessions.map(s => (
-                    <div key={s.id} className="flex items-center justify-between p-3 bg-slate-800/40 rounded-xl border border-slate-700/40 hover:border-slate-600/60 transition-colors">
-                      <div className="min-w-0 flex-1">
-                        <p className="font-medium text-sm text-slate-200 truncate">{s.name}</p>
-                        <p className="text-xs text-slate-500 mt-0.5">{s.venue?.name ?? 'No venue'} · {formatTime(s.startTime)}</p>
-                      </div>
-                      <div className="flex gap-2 ml-3">
-                        <Badge label={s.risk} className={riskBg(s.risk)} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+      {tab === 'Venues' && <EntityPage eyebrow="Locations" title="Venues" description="Keep capacities and availability visible while you schedule." addLabel="New venue" onAdd={() => openNew('venue')}><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{venues.map(venue => { const assigned = sessions.filter(session => session.venueId === venue.id).length; return <Panel key={venue.id} className="p-5"><div className="flex justify-between"><div><div className="grid size-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600"><MapPin size={19} /></div><h2 className="font-display mt-4 text-xl">{venue.name}</h2></div><div className="flex"><IconButton label="Edit venue" onClick={() => openEdit('venue', venue)} /><IconButton label="Delete venue" danger onClick={() => remove('venue', venue.id)} /></div></div><div className="mt-5 flex gap-2"><Badge value={venue.availability} /><Badge value={venue.status} /></div><div className="mt-5 grid grid-cols-2 border-t border-slate-100 pt-4"><div><p className="text-xl font-bold">{venue.capacity}</p><p className="text-xs text-slate-500">capacity</p></div><div><p className="text-xl font-bold">{assigned}</p><p className="text-xs text-slate-500">sessions placed</p></div></div></Panel> })}{!venues.length && <Empty label="No venues in this event" action="Add a venue" onClick={() => openNew('venue')} />}</div></EntityPage>}
 
-              <Card title={role === 'Leadership' ? 'All Tasks' : `${role} Tasks`}>
-                <div className="space-y-3">
-                  {filteredTasks.map(t => (
-                    <div key={t.id} className={cn(
-                      'flex items-start gap-3 p-3 rounded-xl border transition-colors',
-                      t.status === 'Blocked' ? 'bg-rose-950/30 border-rose-800/40' : 'bg-slate-800/40 border-slate-700/40'
-                    )}>
-                      <div className={cn('mt-1.5 w-2 h-2 rounded-full flex-shrink-0', priorityDot(t.priority))} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-slate-200">{t.title}</p>
-                        <div className="flex flex-wrap gap-1 mt-1">
-                          <span className="text-xs text-slate-500">{t.owner}</span>
-                          {t.blocker && <span className="text-xs text-rose-400">⚠ {t.blocker}</span>}
-                        </div>
-                      </div>
-                      <Badge label={t.status} className={statusBg(t.status)} />
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            </div>
+      {tab === 'Impact Analysis' && <div className="mx-auto max-w-3xl space-y-6"><PageTitle eyebrow="Planning tool" title="Venue impact analysis" description="See the downstream effect before marking a location unavailable." /><Panel className="p-6"><label className="label">Venue to simulate</label><div className="mt-2 flex flex-col gap-3 sm:flex-row"><select value={selectedVenueId} onChange={event => { setSelectedVenueId(event.target.value); setImpact(null) }} className="field flex-1"><option value="">Select a venue</option>{venues.map(venue => <option key={venue.id} value={venue.id}>{venue.name} · {venue.capacity} capacity</option>)}</select><button className="button-primary" disabled={!selectedVenueId || analyzing} onClick={runAnalysis}>{analyzing ? 'Analysing…' : 'Run analysis'} <ArrowRight size={16} /></button></div></Panel>{impact && <Panel className="p-6"><div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-widest text-slate-400">Impact report</p><h2 className="font-display mt-1 text-2xl">{impact.venueName}</h2></div><Badge value={impact.severity} /></div><div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">{[['Sessions', impact.affectedSessionCount], ['Tasks', impact.affectedTaskCount], ['Resources', impact.affectedResourceCount], ['Volunteers', impact.affectedVolunteerCount]].map(([label, value]) => <div key={String(label)} className="rounded-xl bg-slate-50 p-3"><p className="font-display text-2xl">{value}</p><p className="text-xs text-slate-500">{label}</p></div>)}</div><p className="mt-6 text-sm leading-6 text-slate-600">{impact.explanation}</p><div className="mt-5"><p className="text-sm font-bold">Recommended actions</p><ol className="mt-2 space-y-2 text-sm text-slate-600">{impact.recommendedActions.map((action, index) => <li key={action} className="flex gap-2"><span className="font-bold text-indigo-600">{index + 1}.</span>{action}</li>)}</ol></div></Panel>}</div>}
 
-            {/* Venues */}
-            <Card title="Venues">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {venues.map(v => (
-                  <div key={v.id} className={cn(
-                    'p-4 rounded-xl border',
-                    v.availability === 'Unavailable' ? 'bg-rose-950/30 border-rose-800/40' : 'bg-slate-800/40 border-slate-700/40'
-                  )}>
-                    <p className="font-semibold text-sm text-slate-200">{v.name}</p>
-                    <p className="text-xs text-slate-500 mt-1">Cap: {v.capacity}</p>
-                    <div className="mt-2">
-                      <Badge label={v.availability} className={v.availability === 'Unavailable' ? riskBg('High') : riskBg('Low')} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </div>
-        )}
+      {tab === 'Notion Sync' && <div className="mx-auto max-w-2xl space-y-6"><PageTitle eyebrow="Integration" title="Notion sync" description="Check the connection used to mirror your event workspace." /><Panel className="p-6"><div className="flex items-center gap-4"><span className={cn('size-3 rounded-full', notionStatus?.connected ? 'bg-emerald-500' : 'bg-slate-300')} /><div><h2 className="font-display text-xl">{notionStatus?.connected ? 'Connected to Notion' : 'Checking connection'}</h2><p className="mt-1 text-sm text-slate-500">{notionStatus?.connected ? `${notionStatus.dbCount} databases available` : 'Add NOTION_TOKEN to server/.env to enable sync.'}</p></div></div><button className="button-secondary mt-6" onClick={() => request('/api/notion/status').then(setNotionStatus).catch(() => showToast('Notion status is unavailable', true))}><RefreshCw size={16} /> Refresh status</button></Panel></div>}
+    </main>
+    {editor && <EditorModal editor={editor} update={updateEditor} onClose={() => setEditor(null)} onSave={saveEditor} venues={venues} sessions={sessions} />}
+  </div>
+}
 
-        {tab === 'Events' && (
-          <div className="space-y-6 max-w-5xl">
-            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
-              <div><p className="text-xs uppercase tracking-[0.22em] text-cyan-400 font-semibold">Portfolio</p><h1 className="text-2xl font-bold">Events</h1><p className="text-sm text-slate-500 mt-1">Create events locally and sync them straight to Notion.</p></div>
-              <Badge label={`${events.length} tracked`} className="bg-cyan-500/15 border-cyan-500/30 text-cyan-300" />
-            </div>
-            <Card title="Create an event">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <input value={eventForm.name} onChange={e => setEventForm({ ...eventForm, name: e.target.value })} placeholder="Event name" className="input-field" />
-                <input value={eventForm.location} onChange={e => setEventForm({ ...eventForm, location: e.target.value })} placeholder="Location" className="input-field" />
-                <input value={eventForm.startDate} onChange={e => setEventForm({ ...eventForm, startDate: e.target.value })} type="datetime-local" className="input-field" />
-                <input value={eventForm.endDate} onChange={e => setEventForm({ ...eventForm, endDate: e.target.value })} type="datetime-local" className="input-field" />
-              </div>
-              <button onClick={createEvent} className="mt-4 px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-sm font-semibold shadow-lg shadow-cyan-900/30">Create & sync event</button>
-            </Card>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {events.map(event => <div key={event.id} className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 hover:border-cyan-500/30 transition-colors"><div className="flex justify-between gap-3"><div><h2 className="font-semibold">{event.name}</h2><p className="text-sm text-slate-500 mt-1">{event.location}</p></div><Badge label={event.status} className={statusBg(event.status)} /></div><p className="text-xs text-slate-400 mt-5">{new Date(event.startDate).toLocaleDateString()} – {new Date(event.endDate).toLocaleDateString()}</p><div className="mt-3 h-1.5 bg-slate-800 rounded-full overflow-hidden"><div className="h-full bg-cyan-400" style={{ width: `${event.overallProgress * 100}%` }} /></div></div>)}
-            </div>
-          </div>
-        )}
+function QuickAction({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) { return <button onClick={onClick} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-3 text-sm font-bold text-slate-700 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700">{icon}{label}</button> }
+function Metric({ label, value, note, tone = 'indigo' }: { label: string; value: number; note: string; tone?: 'indigo' | 'rose' | 'amber' | 'violet' }) { const colors = { indigo: 'text-indigo-600', rose: 'text-rose-600', amber: 'text-amber-600', violet: 'text-violet-600' }; return <Panel className="p-5"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">{label}</p><p className={cn('font-display mt-2 text-3xl', colors[tone])}>{value}</p><p className="mt-1 text-xs text-slate-500">{note}</p></Panel> }
+function SectionHeader({ title, action, onClick }: { title: string; action: string; onClick: () => void }) { return <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-6"><h2 className="font-display text-xl">{title}</h2><button onClick={onClick} className="flex items-center gap-1 text-xs font-bold text-indigo-600 hover:text-indigo-800">{action}<ChevronRight size={14} /></button></div> }
+function Empty({ label, action, onClick }: { label: string; action: string; onClick: () => void }) { return <div className="p-6 text-center text-sm text-slate-500"><p>{label}</p><button onClick={onClick} className="mt-3 font-bold text-indigo-600 hover:text-indigo-800">{action}</button></div> }
+function PageTitle({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) { return <div><p className="text-xs font-bold uppercase tracking-[.18em] text-indigo-600">{eyebrow}</p><h1 className="font-display mt-1 text-3xl tracking-tight">{title}</h1><p className="mt-1 text-sm text-slate-500">{description}</p></div> }
+function EntityPage({ eyebrow, title, description, addLabel, onAdd, children }: { eyebrow: string; title: string; description: string; addLabel: string; onAdd: () => void; children: React.ReactNode }) { return <div className="space-y-6"><div className="flex flex-wrap items-end justify-between gap-4"><PageTitle eyebrow={eyebrow} title={title} description={description} /><button onClick={onAdd} className="button-primary"><Plus size={17} />{addLabel}</button></div>{children}</div> }
 
-        {/* ── SESSIONS ──────────────────────────────────────────── */}
-        {tab === 'Sessions' && (
-          <div className="space-y-4">
-            <h1 className="text-xl font-bold text-slate-100">Sessions</h1>
-            <div className="space-y-4">
-              {sessions.map(s => (
-                <div key={s.id} className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-5">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 flex-wrap">
-                        <h3 className="font-semibold text-slate-100">{s.name}</h3>
-                        <Badge label={s.status} className={statusBg(s.status)} />
-                        <Badge label={`Risk: ${s.risk}`} className={riskBg(s.risk)} />
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-400">
-                        <span>📍 {s.venue?.name ?? 'Unassigned'}</span>
-                        <span>👤 {s.owner}</span>
-                        <span>🕐 {formatTime(s.startTime)} – {formatTime(s.endTime)}</span>
-                      </div>
-                      <p className="mt-2 text-xs text-slate-500">Resources: {s.requiredResources}</p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ── TASKS ─────────────────────────────────────────────── */}
-        {tab === 'Tasks' && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h1 className="text-xl font-bold text-slate-100">Tasks & Escalations</h1>
-              <span className="text-sm text-slate-500">{tasks.filter(t => t.status === 'Blocked').length} blocked · {tasks.filter(t => t.escalationRequired).length} escalated</span>
-            </div>
-            <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-4 flex flex-col sm:flex-row gap-3">
-              <input value={newTaskTitle} onChange={e => setNewTaskTitle(e.target.value)} placeholder="New task title" className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/40" />
-              <input value={newTaskOwner} onChange={e => setNewTaskOwner(e.target.value)} placeholder="Owner (optional)" className="sm:w-48 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/40" />
-              <button onClick={createTask} className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-sm font-semibold rounded-lg text-white transition-colors">Add task</button>
-            </div>
-            {/* Escalations first */}
-            {tasks.filter(t => t.escalationRequired).length > 0 && (
-              <div className="bg-rose-950/30 border border-rose-800/40 rounded-2xl p-4 mb-2">
-                <p className="text-xs font-bold text-rose-400 uppercase tracking-widest mb-3">⚠ Requires Escalation</p>
-                <div className="space-y-3">
-                  {tasks.filter(t => t.escalationRequired).map(t => (
-                    <div key={t.id} className="flex items-start gap-3">
-                      <div className={cn('mt-1.5 w-2 h-2 rounded-full flex-shrink-0', priorityDot(t.priority))} />
-                      <div className="flex-1">
-                        <p className="text-sm font-medium text-slate-200">{t.title}</p>
-                        <p className="text-xs text-rose-400">{t.blocker}</p>
-                      </div>
-                      <span className="text-xs text-slate-400">{t.owner}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div className="space-y-3">
-              {tasks.map(t => (
-                <div key={t.id} className={cn(
-                  'flex items-start gap-3 p-4 rounded-xl border',
-                  t.status === 'Blocked' ? 'bg-rose-950/20 border-rose-800/30' : 'bg-slate-900/60 border-slate-800/80'
-                )}>
-                  <div className={cn('mt-1.5 w-2.5 h-2.5 rounded-full flex-shrink-0', priorityDot(t.priority))} />
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm text-slate-200">{t.title}</p>
-                    <div className="flex flex-wrap gap-2 mt-1">
-                      <span className="text-xs text-slate-500">{t.owner} · {t.role}</span>
-                      {t.blocker && <span className="text-xs text-rose-400">🚫 {t.blocker}</span>}
-                    </div>
-                  </div>
-                  <div className="flex flex-col items-end gap-2">
-                    <Badge label={t.status} className={statusBg(t.status)} />
-                    <Badge label={t.priority} className={riskBg(t.priority === 'Critical' ? 'High' : t.priority === 'High' ? 'High' : t.priority === 'Medium' ? 'Medium' : 'Low')} />
-                    <div className="flex gap-2 mt-1">
-                      {t.status !== 'Done' && (
-                        <button onClick={() => updateTask(t, { status: 'Done' })} className="text-xs px-2 py-1 rounded border border-emerald-700/60 text-emerald-400 hover:bg-emerald-950/50">
-                          Complete
-                        </button>
-                      )}
-                      {!t.escalationRequired && t.status !== 'Done' && (
-                        <button onClick={() => updateTask(t, { escalationRequired: true, blocker: t.blocker || 'Needs leadership review' })} className="text-xs px-2 py-1 rounded border border-amber-700/60 text-amber-400 hover:bg-amber-950/50">
-                          Escalate
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ── IMPACT ANALYSIS ───────────────────────────────────── */}
-        {tab === 'Impact Analysis' && (
-          <div className="space-y-6 max-w-3xl">
-            <div>
-              <h1 className="text-xl font-bold text-slate-100">Venue Change Impact Analysis</h1>
-              <p className="text-sm text-slate-500 mt-1">Simulate a venue becoming unavailable and discover the downstream cascade.</p>
-            </div>
-
-            {/* Change applied banner */}
-            {changeApplied && (
-              <div className="bg-emerald-900/40 border border-emerald-500/30 rounded-xl p-4 flex items-center gap-3">
-                <div className="text-emerald-400 text-xl">✓</div>
-                <div>
-                  <p className="text-sm font-semibold text-emerald-300">Change Applied & Synced</p>
-                  <p className="text-xs text-emerald-500">Local state updated. Notion records being synced in background.</p>
-                </div>
-              </div>
-            )}
-
-            {/* Venue selector */}
-            <Card title="Select Venue to Simulate">
-              <div className="space-y-4">
-                <select
-                  value={selectedVenueId}
-                  onChange={e => { setSelectedVenueId(e.target.value); setImpact(null); setChangeApplied(false) }}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-slate-200 focus:ring-2 focus:ring-amber-500/40 focus:border-amber-500/60 focus:outline-none"
-                >
-                  <option value="">-- Select a venue to make unavailable --</option>
-                  {venues.map(v => (
-                    <option key={v.id} value={v.id} className="bg-slate-900">
-                      {v.name} ({v.availability}) · Cap: {v.capacity}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  onClick={handleAnalyze}
-                  disabled={!selectedVenueId || isAnalyzing}
-                  className="w-full px-5 py-3 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors shadow-lg shadow-amber-600/20"
-                >
-                  {isAnalyzing ? 'Analyzing dependencies...' : '⚡ Run Dependency Impact Analysis'}
-                </button>
-              </div>
-            </Card>
-
-            {/* Impact report */}
-            {impact && (
-              <div className="space-y-4">
-                {/* Header */}
-                <div className="flex items-center justify-between">
-                  <h2 className="font-bold text-lg text-slate-100">Impact Report</h2>
-                  <div className="flex gap-2">
-                    <Badge label="AI-generated analysis" className="bg-blue-500/15 border-blue-500/30 text-blue-400" />
-                    <Badge label={impact.severity} className={riskBg(impact.severity)} />
-                  </div>
-                </div>
-
-                {/* Metrics */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {[
-                    { label: 'Sessions', value: impact.affectedSessionCount, accent: 'text-rose-400' },
-                    { label: 'Tasks Blocked', value: impact.affectedTaskCount, accent: 'text-amber-400' },
-                    { label: 'Resources', value: impact.affectedResourceCount, accent: 'text-orange-400' },
-                    { label: 'Volunteers', value: impact.affectedVolunteerCount, accent: 'text-yellow-400' },
-                  ].map(m => (
-                    <div key={m.label} className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
-                      <p className={cn('text-3xl font-bold', m.accent)}>{m.value}</p>
-                      <p className="text-xs text-slate-500 mt-1">{m.label}</p>
-                    </div>
-                  ))}
-                </div>
-
-                {/* AI explanation */}
-                <div className="bg-blue-950/30 border border-blue-800/40 rounded-xl p-4">
-                  <p className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-2">AI Analysis</p>
-                  <p className="text-sm text-slate-300 leading-relaxed">{impact.explanation}</p>
-                </div>
-
-                {/* Affected sessions */}
-                {impact.affectedSessions.length > 0 && (
-                  <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Affected Sessions</p>
-                    <div className="space-y-2">
-                      {impact.affectedSessions.map(s => (
-                        <div key={s.id} className="flex items-center justify-between">
-                          <span className="text-sm text-slate-300">{s.name}</span>
-                          <div className="flex gap-2">
-                            <span className="text-xs text-slate-500">{s.owner}</span>
-                            <Badge label={s.currentRisk} className={riskBg(s.currentRisk)} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Recommended actions */}
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Recommended Actions</p>
-                  <ol className="space-y-2">
-                    {impact.recommendedActions.map((a, i) => (
-                      <li key={i} className="flex items-start gap-2 text-sm text-slate-300">
-                        <span className="text-amber-500 font-bold">{i + 1}.</span> {a}
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-
-                {/* Apply button */}
-                {!changeApplied && (
-                  <button
-                    onClick={handleApplyChange}
-                    disabled={isApplying}
-                    className="w-full px-5 py-4 bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-white font-bold rounded-xl transition-all shadow-xl shadow-rose-700/30 text-sm"
-                  >
-                    {isApplying
-                      ? '⏳ Applying change & syncing to Notion...'
-                      : '🔴 Apply Change & Sync to Notion'}
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── NOTION SYNC ───────────────────────────────────────── */}
-        {tab === 'Notion Sync' && (
-          <div className="space-y-6 max-w-2xl">
-            <div>
-              <h1 className="text-xl font-bold text-slate-100">Notion Integration</h1>
-              <p className="text-sm text-slate-500 mt-1">Live connection to KBC 2026 | Ripple — Engineering HQ workspace.</p>
-            </div>
-
-            <Card title="Connection Status">
-              <div className="flex items-center gap-4 mb-6">
-                <div className={cn(
-                  'w-3 h-3 rounded-full',
-                  notionStatus?.connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'
-                )} />
-                <div>
-                  <p className="font-semibold text-slate-200">
-                    {notionStatus === null ? 'Checking...' : notionStatus.connected ? 'Connected to Notion' : 'Notion not configured or unreachable'}
-                  </p>
-                  <p className="text-xs text-slate-500">
-                    {notionStatus?.connected
-                      ? `${notionStatus.dbCount} databases available · Last checked: ${new Date(notionStatus.lastSync).toLocaleTimeString()}`
-                      : 'Add NOTION_TOKEN to server/.env, then restart the server.'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                {[
-                  { db: 'Events', id: '3f4f9cf5', ops: 'READ' },
-                  { db: 'Sessions', id: '9d975922', ops: 'READ / WRITE' },
-                  { db: 'Venues', id: 'bf8cc321', ops: 'READ / WRITE' },
-                  { db: 'Tasks', id: '3fe1b77d', ops: 'READ / WRITE' },
-                ].map(item => (
-                  <div key={item.db} className="flex items-center justify-between p-3 bg-slate-800/60 rounded-xl border border-slate-700/40">
-                    <div>
-                      <p className="text-sm font-medium text-slate-200">{item.db}</p>
-                      <p className="text-xs text-slate-500 font-mono">{item.id}</p>
-                    </div>
-                    <Badge label={item.ops} className="bg-slate-700/50 border-slate-600/30 text-slate-300" />
-                  </div>
-                ))}
-              </div>
-
-              <button
-                onClick={loadNotion}
-                className="mt-4 w-full px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm rounded-xl border border-slate-700 transition-colors"
-              >
-                Refresh Notion Status
-              </button>
-            </Card>
-
-            <Card title="How Notion Sync Works">
-              <div className="space-y-4 text-sm text-slate-400">
-                <div className="flex gap-3">
-                  <div className="text-amber-400 font-bold">1.</div>
-                  <div>When you click <strong className="text-slate-200">Apply Change</strong>, the backend immediately updates the local JSON data store.</div>
-                </div>
-                <div className="flex gap-3">
-                  <div className="text-amber-400 font-bold">2.</div>
-                  <div>The server then calls the <strong className="text-slate-200">Notion API</strong> to update the matching Venue, Session, and Task records by name lookup.</div>
-                </div>
-                <div className="flex gap-3">
-                  <div className="text-amber-400 font-bold">3.</div>
-                  <div>An <strong className="text-slate-200">Incident record</strong> is appended to the Engineering HQ page as a callout block.</div>
-                </div>
-                <div className="flex gap-3">
-                  <div className="text-amber-400 font-bold">4.</div>
-                  <div>The UI refreshes to reflect the new state. Open Notion to verify the records were updated.</div>
-                </div>
-              </div>
-            </Card>
-          </div>
-        )}
-
-      </main>
-    </div>
-  )
+function EditorModal({ editor, update, onClose, onSave, venues, sessions }: { editor: Editor; update: (key: string, value: string | number | null) => void; onClose: () => void; onSave: () => void; venues: Venue[]; sessions: Session[] }) {
+  const { entity, data, id } = editor
+  const title = `${id ? 'Edit' : 'New'} ${entity}`
+  const Input = ({ name, label, type = 'text', required = false }: { name: string; label: string; type?: string; required?: boolean }) => <label><span className="label">{label}</span><input required={required} type={type} value={String(data[name] ?? '')} onChange={event => update(name, type === 'number' || type === 'range' ? Number(event.target.value) : event.target.value)} className="field mt-1" /></label>
+  const Select = ({ name, label, options }: { name: string; label: string; options: { label: string; value: string }[] }) => <label><span className="label">{label}</span><select value={String(data[name] ?? '')} onChange={event => update(name, event.target.value)} className="field mt-1">{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40 p-0 sm:items-center sm:p-4"><form onSubmit={event => { event.preventDefault(); onSave() }} className="max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-t-3xl bg-white p-6 shadow-2xl sm:rounded-3xl"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Event workspace</p><h2 className="font-display mt-1 text-2xl capitalize">{title}</h2></div><button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-100">Close</button></div><div className="mt-6 grid gap-4 sm:grid-cols-2">
+    {entity === 'event' && <><Input name="name" label="Event name" required /><Input name="location" label="Location" required /><Input name="startDate" label="Start" type="datetime-local" required /><Input name="endDate" label="End" type="datetime-local" required /><Select name="status" label="Status" options={['Planning', 'Live', 'At Risk', 'Completed'].map(value => ({ label: value, value }))} /><Select name="riskLevel" label="Risk level" options={['Low', 'Medium', 'High'].map(value => ({ label: value, value }))} /><label className="sm:col-span-2"><span className="label">Readiness: {data.overallProgress}%</span><input className="mt-2 w-full accent-indigo-600" type="range" min="0" max="100" value={Number(data.overallProgress)} onChange={event => update('overallProgress', Number(event.target.value))} /></label></>}
+    {entity === 'venue' && <><Input name="name" label="Venue name" required /><Input name="capacity" label="Capacity" type="number" required /><Select name="availability" label="Availability" options={['Available', 'Unavailable'].map(value => ({ label: value, value }))} /><Select name="status" label="Status" options={['Active', 'Reserved', 'Closed'].map(value => ({ label: value, value }))} /></>}
+    {entity === 'session' && <><Input name="name" label="Session name" required /><Input name="owner" label="Session owner" required /><Input name="startTime" label="Start" type="datetime-local" required /><Input name="endTime" label="End" type="datetime-local" required /><Select name="venueId" label="Venue" options={[{ label: 'No venue yet', value: '' }, ...venues.map(venue => ({ label: `${venue.name} (${venue.capacity})`, value: venue.id }))]} /><Select name="status" label="Status" options={['Scheduled', 'Live', 'Completed', 'At Risk', 'Needs Rescheduling'].map(value => ({ label: value, value }))} /><Select name="risk" label="Risk level" options={['Low', 'Medium', 'High'].map(value => ({ label: value, value }))} /><label className="sm:col-span-2"><span className="label">Required resources</span><textarea value={String(data.requiredResources ?? '')} onChange={event => update('requiredResources', event.target.value)} className="field mt-1 min-h-20" placeholder="Projector, microphones, signage…" /></label></>}
+    {entity === 'task' && <><Input name="title" label="Task title" required /><Input name="owner" label="Owner" required /><Select name="role" label="Team" options={ROLES.map(value => ({ label: value, value }))} /><Select name="priority" label="Priority" options={['Low', 'Medium', 'High', 'Critical'].map(value => ({ label: value, value }))} /><Select name="status" label="Status" options={STATUS.map(value => ({ label: value, value }))} /><Select name="sessionId" label="Linked session" options={[{ label: 'No linked session', value: '' }, ...sessions.map(session => ({ label: session.name, value: session.id }))]} /><Select name="venueId" label="Linked venue" options={[{ label: 'No linked venue', value: '' }, ...venues.map(venue => ({ label: venue.name, value: venue.id }))]} /><label className="sm:col-span-2"><span className="label">Blocker (optional)</span><input value={String(data.blocker ?? '')} onChange={event => update('blocker', event.target.value)} className="field mt-1" placeholder="Describe what is holding this up" /></label></>}
+  </div><div className="mt-7 flex justify-end gap-3 border-t border-slate-100 pt-5"><button type="button" onClick={onClose} className="button-secondary">Cancel</button><button className="button-primary" type="submit">{id ? 'Save changes' : `Create ${entity}`}</button></div></form></div>
 }
