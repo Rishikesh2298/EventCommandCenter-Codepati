@@ -56,8 +56,13 @@ export default function App() {
   const showToast = (message: string, error = false) => { setToast({ message, error }); window.setTimeout(() => setToast(null), 3500) }
   const request = async (path: string, method = 'GET', body?: unknown) => {
     const response = await fetch(`${API}${path}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined })
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.error ?? 'Unable to save this change')
+    const payload = await response.text()
+    let data: any
+    try { data = payload ? JSON.parse(payload) : {} }
+    catch {
+      throw new Error(`The API returned HTML instead of JSON for ${path}. Restart the server on port 3001, then try again.`)
+    }
+    if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status})`)
     return data
   }
   const loadAll = useCallback(async () => {
