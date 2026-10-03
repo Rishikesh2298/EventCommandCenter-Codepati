@@ -6,6 +6,7 @@ const API = 'http://localhost:3001'
 type Venue = { id: string; name: string; capacity: number; availability: string; status: string }
 type Session = { id: string; name: string; owner: string; status: string; risk: string; startTime: string; endTime: string; venueId: string; venue?: Venue; requiredResources: string }
 type Task = { id: string; title: string; owner: string; role: string; status: string; priority: string; sessionId: string | null; blocker: string | null; escalationRequired: boolean }
+type EventRecord = { id: string; name: string; status: string; startDate: string; endDate: string; location: string; overallProgress: number; riskLevel: string }
 type Stats = { totalTasks: number; completedTasks: number; blockedTasks: number; inProgressTasks: number; criticalRisks: number; atRiskSessions: number; totalSessions: number; unavailableVenues: number; escalationRequired: number; eventName: string; eventStatus: string; overallProgress: number }
 type ImpactReport = { venueName: string; severity: string; affectedSessionCount: number; affectedTaskCount: number; affectedResourceCount: number; affectedVolunteerCount: number; explanation: string; recommendedActions: string[]; affectedSessions: { id: string; name: string; owner: string; currentRisk: string }[] }
 type NotionStatus = { connected: boolean; lastSync: string; dbCount: number }
@@ -72,8 +73,8 @@ function StatCard({ label, value, sub, accent }: { label: string; value: string 
 }
 
 // ── Tabs ─────────────────────────────────────────────────────────────────────
-type Tab = 'Dashboard' | 'Sessions' | 'Tasks' | 'Impact Analysis' | 'Notion Sync'
-const TABS: Tab[] = ['Dashboard', 'Sessions', 'Tasks', 'Impact Analysis', 'Notion Sync']
+type Tab = 'Dashboard' | 'Events' | 'Sessions' | 'Tasks' | 'Impact Analysis' | 'Notion Sync'
+const TABS: Tab[] = ['Dashboard', 'Events', 'Sessions', 'Tasks', 'Impact Analysis', 'Notion Sync']
 const ROLES = ['Leadership', 'Operations', 'Volunteers', 'Technical'] as const
 type Role = typeof ROLES[number]
 
@@ -85,9 +86,11 @@ export default function App() {
   const [venues, setVenues] = useState<Venue[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
+  const [events, setEvents] = useState<EventRecord[]>([])
   const [notionStatus, setNotionStatus] = useState<NotionStatus | null>(null)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskOwner, setNewTaskOwner] = useState('')
+  const [eventForm, setEventForm] = useState({ name: '', location: '', startDate: '', endDate: '' })
 
   // Impact analysis
   const [selectedVenueId, setSelectedVenueId] = useState('')
@@ -104,18 +107,20 @@ export default function App() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [s, v, sess, t] = await Promise.all([
+      const [s, v, sess, t, e] = await Promise.all([
         fetch(`${API}/api/stats`).then(r => r.json()),
         fetch(`${API}/api/venues`).then(r => r.json()),
         fetch(`${API}/api/sessions`).then(r => r.json()),
-        fetch(`${API}/api/tasks`).then(r => r.json())
+        fetch(`${API}/api/tasks`).then(r => r.json()),
+        fetch(`${API}/api/events`).then(r => r.json())
       ])
       setStats(s)
       setVenues(v)
       setSessions(sess)
       setTasks(t)
+      setEvents(e)
     } catch {
-      showToast('Failed to connect to Ripple server. Is it running on port 3001?', 'error')
+      showToast('Failed to connect to EventAstra server. Is it running on port 3001?', 'error')
     }
   }, [])
 
@@ -213,13 +218,32 @@ export default function App() {
     }
   }
 
+  const createEvent = async () => {
+    if (!Object.values(eventForm).every(value => value.trim())) {
+      showToast('Complete every event field first.', 'error')
+      return
+    }
+    try {
+      const response = await fetch(`${API}/api/events`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...eventForm, status: 'Planning', riskLevel: 'Low' })
+      })
+      if (!response.ok) throw new Error('Event creation failed')
+      setEventForm({ name: '', location: '', startDate: '', endDate: '' })
+      await loadAll()
+      showToast('Event created and queued for Notion sync.', 'success')
+    } catch {
+      showToast('Could not create the event. Please retry.', 'error')
+    }
+  }
+
   const filteredTasks = role === 'Leadership'
     ? tasks
     : tasks.filter(t => t.role === role || t.role === 'Operations')
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#0a0c10] text-slate-100 font-['Inter',sans-serif]">
+    <div className="min-h-screen bg-[#080b16] text-slate-100 font-['Inter',sans-serif] selection:bg-cyan-400/30">
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');`}</style>
 
       {/* Toast */}
@@ -233,17 +257,17 @@ export default function App() {
       )}
 
       {/* Navbar */}
-      <nav className="border-b border-slate-800/60 bg-[#0d1017]/80 backdrop-blur-md sticky top-0 z-40">
+      <nav className="border-b border-slate-800/60 bg-[#0d1017]/90 backdrop-blur-md sticky top-0 z-40 shadow-xl shadow-black/20">
         <div className="max-w-7xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-amber-400 to-orange-600 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-cyan-400 via-blue-500 to-violet-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
               <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
             </div>
             <div>
-              <span className="font-bold text-base bg-gradient-to-r from-amber-300 to-orange-400 bg-clip-text text-transparent">Ripple</span>
-              <span className="ml-2 text-xs text-slate-500">Event Command Center</span>
+              <span className="font-extrabold text-base tracking-tight bg-gradient-to-r from-cyan-300 via-blue-300 to-violet-300 bg-clip-text text-transparent">EventAstra</span>
+              <span className="ml-2 text-xs text-slate-500">Event intelligence, live</span>
             </div>
           </div>
 
@@ -278,7 +302,7 @@ export default function App() {
               className={cn(
                 'px-4 py-2.5 text-sm font-medium rounded-lg transition-all whitespace-nowrap',
                 tab === t
-                  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/25'
+                  ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-400/25 shadow-sm shadow-cyan-900/30'
                   : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'
               )}
             >
@@ -376,6 +400,27 @@ export default function App() {
                 ))}
               </div>
             </Card>
+          </div>
+        )}
+
+        {tab === 'Events' && (
+          <div className="space-y-6 max-w-5xl">
+            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+              <div><p className="text-xs uppercase tracking-[0.22em] text-cyan-400 font-semibold">Portfolio</p><h1 className="text-2xl font-bold">Events</h1><p className="text-sm text-slate-500 mt-1">Create events locally and sync them straight to Notion.</p></div>
+              <Badge label={`${events.length} tracked`} className="bg-cyan-500/15 border-cyan-500/30 text-cyan-300" />
+            </div>
+            <Card title="Create an event">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input value={eventForm.name} onChange={e => setEventForm({ ...eventForm, name: e.target.value })} placeholder="Event name" className="input-field" />
+                <input value={eventForm.location} onChange={e => setEventForm({ ...eventForm, location: e.target.value })} placeholder="Location" className="input-field" />
+                <input value={eventForm.startDate} onChange={e => setEventForm({ ...eventForm, startDate: e.target.value })} type="datetime-local" className="input-field" />
+                <input value={eventForm.endDate} onChange={e => setEventForm({ ...eventForm, endDate: e.target.value })} type="datetime-local" className="input-field" />
+              </div>
+              <button onClick={createEvent} className="mt-4 px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-sm font-semibold shadow-lg shadow-cyan-900/30">Create & sync event</button>
+            </Card>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {events.map(event => <div key={event.id} className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 hover:border-cyan-500/30 transition-colors"><div className="flex justify-between gap-3"><div><h2 className="font-semibold">{event.name}</h2><p className="text-sm text-slate-500 mt-1">{event.location}</p></div><Badge label={event.status} className={statusBg(event.status)} /></div><p className="text-xs text-slate-400 mt-5">{new Date(event.startDate).toLocaleDateString()} – {new Date(event.endDate).toLocaleDateString()}</p><div className="mt-3 h-1.5 bg-slate-800 rounded-full overflow-hidden"><div className="h-full bg-cyan-400" style={{ width: `${event.overallProgress * 100}%` }} /></div></div>)}
+            </div>
           </div>
         )}
 
